@@ -85,13 +85,6 @@ async def deck1(x, cb, index):
                 std.write(pkt)
 
 
-def just(i, x):
-    assert(type(x)==int)
-    assert(x>0)
-    y=iter (i)
-    while (x:=x-1)>=0:
-        yield next(y)
-
 async def filter_switch():
     global main_filter
     global do_not_just_change
