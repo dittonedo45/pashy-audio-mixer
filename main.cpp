@@ -221,13 +221,18 @@ struct OSPacket : public exception {};
 class  Format {
 	public:
 	AVFormatContext* fmtctx{NULL};
-	int ret, stream_index, rchd_end{0};
+	int ret, stream_index;
 	int rate{44100};
 	int channels{2};
 	Codec ctx;
 	SwrContext* swr{NULL};
 	AVPacket* pkt{av_packet_alloc()};
 	AVCodecContext* enc;
+	AVFrame *frame=av_frame_alloc ();
+	AVCodec* e=avcodec_find_encoder (
+		AV_CODEC_ID_MP3);
+
+	AVFrame *fframe=av_frame_alloc ();
 
 	operator int()
 	{
@@ -239,11 +244,14 @@ class  Format {
 	}
 	Format ()
 	{}
+
+	void stage_alloc_encoder ()
+	{
+
+	}
 	void alloc_enc()
 	{
 		// TODO create a structure for this.
-		AVCodec* e=avcodec_find_encoder (
-			AV_CODEC_ID_MP3);
 		enc=avcodec_alloc_context3 (e);
 		uint64_t c_l;
 
@@ -274,66 +282,76 @@ class  Format {
 		ctx=f.ctx;
 	}
 
-	Format (char *str)
+	void stage_open_input ()
 	{
 		ret=avformat_open_input (&fmtctx,
-				str, NULL, NULL);
+				str.c_str (),
+				NULL, 
+				NULL);
 		if (ret<0) {
 			throw a_exception ();
 		}
-		find_stream ();
-		// TODO delegate the work of this part.
-		try{
-
-			ctx.stream_index=ret=av_find_best_stream (fmtctx,
-					AVMEDIA_TYPE_AUDIO,-1,-1,&ctx.d,NULL);
-			if (ret<0)
-			{
-				abort ();
-				throw ret;
-			}
-			//ctx.alloc ();
-			ctx.dec_ctx = avcodec_alloc_context3 (ctx.d);
-			if (!ctx.dec_ctx) abort ();
-			ret=avcodec_parameters_to_context(ctx.dec_ctx,
-					fmtctx->streams[ctx.stream_index]->codecpar);
-			if (ret<0)
-				throw ret;
-			ret=avcodec_open2 (ctx.dec_ctx, ctx.d, NULL);
-			if (ret<0)
-			{
-				abort ();
-				throw ret;
-			}
-			alloc_enc ();
-
-			swr=swr_alloc_set_opts(NULL,
-				 enc->channel_layout,
-				 enc->sample_fmt,
-				 enc->sample_rate,
-				 ctx.dec_ctx->channel_layout,
-				 ctx.dec_ctx->sample_fmt,
-				 ctx.dec_ctx->sample_rate,
-				 0,
-				 NULL
-				 );
-			int ret=swr_init(swr);
-			if (ret<0)
-				abort ();
-		} catch (a_ins_mem& exp)
-		{
-			cerr<<exp.what()<<endl;
-			throw;
-		}
 	}
 
-	void find_stream ()
+	void stage_find_stream ()
 	{
 		ret=avformat_find_stream_info (fmtctx, NULL);
 		if (ret<0) {
 			throw a_find_stream_error ();
 		}
 	}
+
+	void stage_find_stream_index ()
+	{
+		ctx.stream_index=ret=av_find_best_stream (fmtctx,
+				AVMEDIA_TYPE_AUDIO,-1,-1,&ctx.d,NULL);
+		if (ret<0)
+		{
+			abort ();
+			throw ret;
+		}
+	}
+
+
+	void stage_alloc_context ()
+	{
+		ctx.dec_ctx = avcodec_alloc_context3 (ctx.d);
+		if (!ctx.dec_ctx) abort ();
+		ret=avcodec_parameters_to_context(ctx.dec_ctx,
+				fmtctx->streams[ctx.stream_index]->codecpar);
+		if (ret<0)
+			throw ret;
+		ret=avcodec_open2 (ctx.dec_ctx, ctx.d, NULL);
+		if (ret<0)
+		{
+			abort ();
+			throw ret;
+		}
+		alloc_enc ();
+	}
+
+	void stage_alloc_swr ()
+	{
+		swr=swr_alloc_set_opts(NULL,
+			 enc->channel_layout,
+			 enc->sample_fmt,
+			 enc->sample_rate,
+			 ctx.dec_ctx->channel_layout,
+			 ctx.dec_ctx->sample_fmt,
+			 ctx.dec_ctx->sample_rate,
+			 0,
+			 NULL
+			 );
+		int ret=swr_init(swr);
+		if (ret<0)
+			abort ();
+
+	}
+
+	Format (char *str)
+	{
+	}
+
 	private:
 	void _get_packet ()
 	{
@@ -344,31 +362,64 @@ class  Format {
 			throw OSPacket();
 	}
 	public:
-	AVPacket*& get_packet ()
+	void stage_get_packet ()
 	{
-		while (1)
-		try {
-			_get_packet ();
-			break;
-		}catch (OSPacket& e)
+		int ret=0;
+		ret=av_read_frame (fmtctx, pkt);
+		if (ret<0)
 		{
-			throw -1;
-		}catch (...)
-		{
-			throw;
+			throw ret;
 		}
-		return pkt;
 	}
 
-	int set_frame(AVPacket* pkt)
+	void stage_send_frame2decode()
 	{
 		ret=avcodec_send_packet (ctx.dec_ctx, pkt);
 		if (ret<0)
 		{
 			throw ret;
 		}
-		rchd_end=0;
-		return 2;
+	}
+
+	void stage_send_flush_decoder()
+	{
+		ret=avcodec_send_packet (ctx.dec_ctx, NULL);
+		if (ret<0)
+		{
+			throw ret;
+		}
+	}
+
+	void stage_receive_frame ()
+	{
+		ret=avcodec_receive_frame (ctx.dec_ctx, frame);
+		if (ret<0)
+		{
+			throw ret;
+		}
+	}
+
+	void stage_set_encoder_parameters ()
+	{
+		fframe->sample_rate=enc->sample_rate;
+		fframe->channel_layout=enc->channel_layout;
+		fframe->channels=enc->channels;
+		fframe->format=enc->sample_fmt;
+		av_frame_get_buffer (fframe, 0);
+	}
+
+	AVFrame* stage_get_frames()
+	{
+		swr_convert_frame (swr, fframe, frame);
+		av_frame_free (&frame);
+		return fframe;
+	}
+
+	~Format ()
+	{
+		avcodec_free_context (&enc);
+		avformat_close_input (&fmtctx);
+		avformat_free_context(fmtctx);
 	}
 
 	void seek(int s)
@@ -385,37 +436,7 @@ class  Format {
 		return fmtctx->streams[stream_index]->duration;
 	}
 
-	AVFrame* get_frames()
-	{
-		if (rchd_end)
-			return NULL;
-		AVFrame *frame=av_frame_alloc ();
-		AVFrame *fframe=av_frame_alloc ();
-		ret=avcodec_receive_frame (ctx.dec_ctx, frame);
-		if (ret<0)
-		{
-			rchd_end=1;
-			av_frame_free (&frame);
-			av_frame_free (&fframe);
-			return NULL;
-		}
-		fframe->sample_rate=enc->sample_rate;
-		fframe->channel_layout=enc->channel_layout;
-		fframe->channels=enc->channels;
-		fframe->format=enc->sample_fmt;
-		av_frame_get_buffer (fframe, 0);
 
-		swr_convert_frame (swr, fframe, frame);
-		av_frame_free (&frame);
-		return fframe;
-	}
-
-	~Format ()
-	{
-		avcodec_free_context (&enc);
-		avformat_close_input (&fmtctx);
-		avformat_free_context(fmtctx);
-	}
 
 };
 struct gil
@@ -430,45 +451,6 @@ struct gil
 	}
 };
 
-namespace packet
-{
-	struct fobject {
-		PyObject_HEAD
-		AVPacket* pkt;
-	};
-	using T=PyObject*;
-	T fobject_new (PyTypeObject* t, T a, T k)
-	{
-		return t->tp_alloc(t, 0);
-	}
-	int fobject_init (T t, T a, T k)
-	{
-		PyGILState_STATE state=PyGILState_Ensure ();
-		fobject* fb=(fobject*)t;
-		gil g;
-		fb->pkt=av_packet_alloc ();
-		if (!fb->pkt )
-		{
-			PyErr_NoMemory ();
-			return 1;
-		}
-		return 0;
-	}
-	void fobject_dealloc (T o)
-	{
-		fobject* f=(fobject*) o;
-		av_packet_free (&f->pkt);
-	}
-	static PyTypeObject fobject_type ={
-		PyVarObject_HEAD_INIT (NULL, 0)
-		.tp_name="AVPacket",
-		.tp_init=fobject_init,
-		.tp_dealloc=fobject_dealloc,
-		.tp_new=fobject_new,
-		.tp_basicsize=sizeof(fobject),
-		.tp_flags=Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE
-	};
-}
 
 namespace filter {
 	struct fil_object {
@@ -618,9 +600,13 @@ namespace filter {
 
 namespace f
 {
+	enum stage_t {
+
+	};
 	struct fobject {
 		PyObject_HEAD
 		Format* fmtctx;
+		int stage;
 	};
 
 	using T=PyObject*;
@@ -809,7 +795,6 @@ namespace f
 		PyObject *ov=PyModule_Create (&avv);
 
 		PyType_Ready (&fobject_type);
-		PyType_Ready (&packet::fobject_type);
 		PyType_Ready (&filter::fobject_type);
 
 		if (!Format_EOF)
@@ -826,10 +811,6 @@ namespace f
 		Py_XINCREF(&fobject_type);
 		PyModule_AddObject (ov, "Format",
 				(t)&fobject_type
-		);
-		Py_XINCREF(&packet::fobject_type);
-		PyModule_AddObject (ov, "Packet",
-				(T)&packet::fobject_type
 		);
 		Py_XINCREF(&filter::fobject_type);
 		PyModule_AddObject (ov, "Filter",
