@@ -1,3 +1,17 @@
+# You compile like so
+## On bash Type or Copy this snipplet:
+```zsh
+g++ main.cpp -lavformat -std=c++11 `pkg-config --cflags --libs python-3.8-embed libavcodec libavutil libswresample libavfilter libavutil libavformat`
+```
+
+## Enjoy your tracks, after typing:
+```sh
+./a.out ./res.py /storage/sdcard1/BUSINESS\ IS\ BUSINESS\ Album/*.mp3 | play -qtmp3 -
+```
+
+# Am feeling lazy, to create a proper (auto compilation) script or setup.
+
+#C++ file!!
 ```cpp
 #include <iostream>
 #include <vector>
