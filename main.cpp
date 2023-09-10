@@ -218,21 +218,26 @@ struct Codec {
 
 struct OSPacket : public exception {};
 
-class  Format {
+class Format
+{
 	public:
+
 	AVFormatContext* fmtctx{NULL};
+	string filepath;
+
 	int ret, stream_index;
-	int rate{44100};
-	int channels{2};
 	Codec ctx;
 	SwrContext* swr{NULL};
-	AVPacket* pkt{av_packet_alloc()};
-	AVCodecContext* enc;
-	AVFrame *frame=av_frame_alloc ();
-	AVCodec* e=avcodec_find_encoder (
-		AV_CODEC_ID_MP3);
 
-	AVFrame *fframe=av_frame_alloc ();
+	int rate{44100};
+	int channels{2};
+	AVPacket* pkt{av_packet_alloc()};
+	AVFrame *frame{av_frame_alloc ()};
+	AVFrame *fframe{av_frame_alloc ()};
+
+	AVCodecContext* enc;
+	const AVCodec* e{avcodec_find_encoder (AV_CODEC_ID_MP3)};
+
 
 	operator int()
 	{
@@ -247,13 +252,15 @@ class  Format {
 
 	void stage_alloc_encoder ()
 	{
-
-	}
-	void alloc_enc()
-	{
-		// TODO create a structure for this.
 		enc=avcodec_alloc_context3 (e);
-		uint64_t c_l;
+		if (!enc)
+		{
+			throw 1;
+		}
+	}
+	void stage_encoder_set_parameters ()
+	{
+		uint64_t channel_layout;
 
 		for (const int *p=e->supported_samplerates;
 				p && *p<=0; p++)
@@ -261,14 +268,17 @@ class  Format {
 			if(rate<*p)
 				rate=*p;
 		}
-		c_l=*e->channel_layouts;
-		channels=av_get_channel_layout_nb_channels (c_l);
+		channel_layout=*e->channel_layouts;
+		channels=av_get_channel_layout_nb_channels (channel_layout);
 		enc->sample_rate=rate;
-		enc->channel_layout=c_l;
+		enc->channel_layout=channel_layout;
 		enc->channels=channels;
 		enc->sample_fmt=*(e->sample_fmts);
 		enc->time_base={1,rate};
+	}
 
+	void alloc_enc()
+	{
 		int ret=avcodec_open2 (enc, e, NULL);
 		if (ret<0)
 			abort ();
@@ -285,11 +295,11 @@ class  Format {
 	void stage_open_input ()
 	{
 		ret=avformat_open_input (&fmtctx,
-				str.c_str (),
+				filepath.c_str (),
 				NULL, 
 				NULL);
 		if (ret<0) {
-			throw a_exception ();
+			throw ret;
 		}
 	}
 
@@ -297,7 +307,7 @@ class  Format {
 	{
 		ret=avformat_find_stream_info (fmtctx, NULL);
 		if (ret<0) {
-			throw a_find_stream_error ();
+			throw ret;
 		}
 	}
 
@@ -348,7 +358,7 @@ class  Format {
 
 	}
 
-	Format (char *str)
+	Format (char *str) : filepath (str)
 	{
 	}
 
@@ -601,7 +611,20 @@ namespace filter {
 namespace f
 {
 	enum stage_t {
-
+		STAGE_FATAL_ERROR=-53,
+		STAGE_ALLOC_ENCODER=0,
+		STAGE_ENCODER_SET_PARAMETERS,
+		STAGE_OPEN_INPUT,
+		STAGE_FIND_STREAM,
+		STAGE_FIND_STREAM_INDEX,
+		STAGE_ALLOC_CONTEXT,
+		STAGE_ALLOC_SWR,
+		STAGE_GET_PACKET,
+		STAGE_SEND_FRAME2DECODE,
+		STAGE_SEND_FLUSH_DECODER,
+		STAGE_RECEIVE_FRAME,
+		STAGE_SET_ENCODER_PARAMETERS,
+		STAGE_GET_FRAMES,
 	};
 	struct fobject {
 		PyObject_HEAD
@@ -633,6 +656,7 @@ namespace f
 				}
 			} g;
 			fb->fmtctx=new Format(path);
+			fb->stage=STAGE_ALLOC_ENCODER;
 		}catch(a_exception& exp)
 		{
 			PyErr_Format (PyExc_RuntimeError,
@@ -650,66 +674,102 @@ namespace f
 		fobject* f=(fobject*) o;
 		delete f->fmtctx;
 	}
-	T get_packet (T s, T a)
+	T process_audio (T s, T a)
 	{
-		AVPacket *pkt(av_packet_alloc ());
-		try {
-			fobject* f=(fobject*) s;
-			AVPacket*& pkt=f->fmtctx->get_packet ();
-			AVPacket* res=av_packet_clone(pkt);
-			return PyCapsule_New(res, "_packet",
-					+[](T obj)
-					{
-					Py_XINCREF (obj);
-					AVPacket* p=
-					(AVPacket*)
-					PyCapsule_GetPointer (obj, "_packet");
-					av_packet_free(&p);
-					});
-		}catch(...)
+		fobject* f=(fobject*) s;
+		Format *inner_f=f->fmtctx;
+		int cur_stage=f->stage;
+
+		switch (f->stage)
 		{
-			PyErr_Format (Format_EOF,
-					"reached end of file");
-			return NULL;
+			case STAGE_ALLOC_ENCODER:
+				inner_f->stage_alloc_encoder();
+				f->stage=STAGE_ENCODER_SET_PARAMETERS;
+				break;
+			case STAGE_ENCODER_SET_PARAMETERS:
+				inner_f->stage_encoder_set_parameters();
+				f->stage=STAGE_OPEN_INPUT;
+				break;
+			case STAGE_OPEN_INPUT:
+			try{
+				inner_f->stage_open_input();
+				f->stage++;
+			} catch (...)
+			{
+				f->stage=STAGE_FATAL_ERROR;
+			}
+				break;
+			case STAGE_FIND_STREAM:
+			try{
+				inner_f->stage_find_stream();
+				f->stage++;
+			} catch (...)
+			{
+				f->stage=STAGE_FATAL_ERROR;
+			}
+				break;
+			case STAGE_FIND_STREAM_INDEX:
+				try{
+					inner_f->stage_find_stream_index();
+					f->stage++;
+				} catch (...)
+				{
+					f->stage=STAGE_FATAL_ERROR;
+				}
+				break;
+			case STAGE_ALLOC_CONTEXT:
+				inner_f->stage_alloc_context();
+				f->stage++;
+				break;
+			case STAGE_ALLOC_SWR:
+				inner_f->stage_alloc_swr();
+				f->stage++;
+				break;
+			case STAGE_GET_PACKET:
+				inner_f->stage_get_packet();
+				f->stage++;
+				break;
+			case STAGE_SEND_FRAME2DECODE:
+				inner_f->stage_send_frame2decode();
+				f->stage++;
+				break;
+			case STAGE_SEND_FLUSH_DECODER:
+				inner_f->stage_send_flush_decoder();
+				f->stage++;
+				break;
+			case STAGE_RECEIVE_FRAME:
+				inner_f->stage_receive_frame();
+				f->stage++;
+				break;
+			case STAGE_SET_ENCODER_PARAMETERS:
+				inner_f->stage_set_encoder_parameters();
+				f->stage++;
+				break;
+			case STAGE_GET_FRAMES:
+				inner_f->stage_get_frames ();
+				f->stage++;
+				break;
+			case STAGE_FATAL_ERROR:
+				PyErr_Format (
+					PyExc_RuntimeError,
+					"Fatal Error: whilst trying to read this track."
+						);
+				return NULL;
+			default:
+				break;
 		}
+
+		return PyTuple_Pack (2,
+			PyLong_FromLong (cur_stage),
+			PyLong_FromLong (f->stage));
+
 	}
 	T get_frames (T s, T a)
 	{
 		T arg;
 		if (!PyArg_ParseTuple (a, "O", &arg))
 			return NULL;
-		try {
-			fobject* f=(fobject*) s;
-
-			if (arg!=Py_None)
-			{
-				try{
-					Py_XINCREF (arg);
-					AVPacket* pkt=(AVPacket*)PyCapsule_GetPointer(arg, "_packet");
-					f->fmtctx->set_frame (pkt);
-				} catch (int& ret)
-				{
-					Py_RETURN_NONE;
-				}
-			}
-			AVFrame* frame=f->fmtctx->get_frames ();
-			if (!frame)
-				throw 0x0;
-			return PyCapsule_New(frame, "_frame",
-					+[](T obj)
-				{
-					AVFrame* p=
-					(AVFrame*)
-					PyCapsule_GetPointer (obj, "_frame");
-					gil g;
-					av_frame_free(&p);
-				});
-		}catch(...)
-		{
-			PyErr_Format (PyExc_EOFError,
-					"reached end of file");
-			return NULL;
-		}
+		Py_RETURN_NONE;
 	}
 	T seek_duration (T s, T a)
 	{
@@ -742,8 +802,6 @@ namespace f
 		Py_RETURN_NONE;
 	}
 	static PyMethodDef methods[]={
-		{"get_packet", get_packet, METH_VARARGS,
-			"Get a packet"},
 		{"send_frame",get_frames, METH_VARARGS,
 			"Get_frame"},
 		{"seek_duration",
