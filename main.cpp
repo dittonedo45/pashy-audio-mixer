@@ -425,8 +425,13 @@ class Format
 	}
 
 	int set_fframe=0;
+
 	void stage_set_encoder_parameters ()
 	{
+		static int run_once_once=0;
+		if (run_once_once) return;
+		run_once_once=1;
+
 		if (!fframe)
 		{
 			fframe=av_frame_alloc ();
@@ -800,6 +805,7 @@ namespace f
 				} catch (...)
 				{
 					f->stage=STAGE_GET_PACKET;
+					f->stage=STAGE_RECEIVE_FRAME;
 				}
 				break;
 			case STAGE_SEND_FLUSH_DECODER:
@@ -815,8 +821,12 @@ namespace f
 				try {
 					inner_f->stage_receive_frame();
 					f->stage=STAGE_SET_ENCODER_PARAMETERS;
-				} catch (...)
+				} catch (int& err)
 				{
+					if (err==AVERROR_EOF)
+					{
+						f->stage=STAGE_FATAL_ERROR;
+					}
 					f->stage=STAGE_GET_PACKET;
 				}
 				break;
@@ -828,11 +838,16 @@ namespace f
 				break;
 			case STAGE_GET_FRAMES:
 				try {
-					AVFrame* frame=inner_f->stage_get_frames ();
+					AVFrame* frame=NULL;
 					f->stage=STAGE_RECEIVE_FRAME;
+
+					frame=inner_f->stage_get_frames ();
 					if (frame)
 					{
-						return PyCapsule_New (frame, "_frame",
+						AVFrame* new_frame=av_frame_alloc ();
+						av_frame_copy (new_frame, frame);
+
+						return PyCapsule_New (new_frame, "_frame",
 					+[](T obj)
 					{
 						AVFrame* p=(AVFrame*)PyCapsule_GetPointer
