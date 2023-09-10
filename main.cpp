@@ -317,7 +317,6 @@ class Format
 				AVMEDIA_TYPE_AUDIO,-1,-1,&ctx.d,NULL);
 		if (ret<0)
 		{
-			abort ();
 			throw ret;
 		}
 	}
@@ -326,15 +325,19 @@ class Format
 	void stage_alloc_context ()
 	{
 		ctx.dec_ctx = avcodec_alloc_context3 (ctx.d);
-		if (!ctx.dec_ctx) abort ();
+		if (!ctx.dec_ctx)
+		{
+			throw 1;
+		}
 		ret=avcodec_parameters_to_context(ctx.dec_ctx,
 				fmtctx->streams[ctx.stream_index]->codecpar);
 		if (ret<0)
+		{
 			throw ret;
+		}
 		ret=avcodec_open2 (ctx.dec_ctx, ctx.d, NULL);
 		if (ret<0)
 		{
-			abort ();
 			throw ret;
 		}
 		alloc_enc ();
@@ -352,9 +355,15 @@ class Format
 			 0,
 			 NULL
 			 );
+		if (!swr)
+		{
+
+		}
 		int ret=swr_init(swr);
 		if (ret<0)
-			abort ();
+		{
+			throw ret;
+		}
 
 	}
 
@@ -362,24 +371,26 @@ class Format
 	{
 	}
 
-	private:
-	void _get_packet ()
+	public: 
+	int error_eof{0};
+
+	bool rightful_pkt ()
 	{
-		int ret(av_read_frame (fmtctx, pkt));
-		if (ret==AVERROR_EOF)
-			throw -1;
-		if (ret<0)
-			throw OSPacket();
+		return ctx.stream_index==pkt->stream_index;
 	}
-	public:
 	void stage_get_packet ()
 	{
 		int ret=0;
-		ret=av_read_frame (fmtctx, pkt);
-		if (ret<0)
+		if (error_eof)
 		{
-			throw ret;
+			throw error_eof;
 		}
+		ret=av_read_frame (fmtctx, pkt);
+		if (ret==AVERROR_EOF)
+		{
+			error_eof=ret;
+		}
+		throw ret;
 	}
 
 	void stage_send_frame2decode()
@@ -402,6 +413,10 @@ class Format
 
 	void stage_receive_frame ()
 	{
+		if (!frame)
+		{
+			frame=av_frame_alloc ();
+		}
 		ret=avcodec_receive_frame (ctx.dec_ctx, frame);
 		if (ret<0)
 		{
@@ -409,18 +424,33 @@ class Format
 		}
 	}
 
+	int set_fframe=0;
 	void stage_set_encoder_parameters ()
 	{
-		fframe->sample_rate=enc->sample_rate;
-		fframe->channel_layout=enc->channel_layout;
-		fframe->channels=enc->channels;
-		fframe->format=enc->sample_fmt;
-		av_frame_get_buffer (fframe, 0);
+		if (!fframe)
+		{
+			fframe=av_frame_alloc ();
+		}
+		if (!set_fframe)
+		{
+			fframe->sample_rate=enc->sample_rate;
+			fframe->channel_layout=enc->channel_layout;
+			fframe->channels=enc->channels;
+			fframe->format=enc->sample_fmt;
+			av_frame_get_buffer (fframe, 0);
+
+			set_fframe=1;
+		}
 	}
 
 	AVFrame* stage_get_frames()
 	{
-		swr_convert_frame (swr, fframe, frame);
+		int ret;
+		if (!frame || !fframe)
+		{
+			abort ();
+		}
+		ret=swr_convert_frame (swr, fframe, frame);
 		av_frame_free (&frame);
 		return fframe;
 	}
@@ -611,7 +641,8 @@ namespace filter {
 namespace f
 {
 	enum stage_t {
-		STAGE_FATAL_ERROR=-53,
+		STAGE_NO_OPT=-53,
+		STAGE_FATAL_ERROR,
 		STAGE_ALLOC_ENCODER=0,
 		STAGE_ENCODER_SET_PARAMETERS,
 		STAGE_OPEN_INPUT,
@@ -691,22 +722,22 @@ namespace f
 				f->stage=STAGE_OPEN_INPUT;
 				break;
 			case STAGE_OPEN_INPUT:
-			try{
-				inner_f->stage_open_input();
-				f->stage++;
-			} catch (...)
-			{
-				f->stage=STAGE_FATAL_ERROR;
-			}
+				try{
+					inner_f->stage_open_input();
+					f->stage++;
+				} catch (...)
+				{
+					f->stage=STAGE_FATAL_ERROR;
+				}
 				break;
 			case STAGE_FIND_STREAM:
-			try{
-				inner_f->stage_find_stream();
-				f->stage++;
-			} catch (...)
-			{
-				f->stage=STAGE_FATAL_ERROR;
-			}
+				try{
+					inner_f->stage_find_stream();
+					f->stage++;
+				} catch (...)
+				{
+					f->stage=STAGE_FATAL_ERROR;
+				}
 				break;
 			case STAGE_FIND_STREAM_INDEX:
 				try{
@@ -718,36 +749,105 @@ namespace f
 				}
 				break;
 			case STAGE_ALLOC_CONTEXT:
-				inner_f->stage_alloc_context();
-				f->stage++;
+				try {
+					inner_f->stage_alloc_context();
+					f->stage++;
+				} catch (...)
+				{
+					f->stage=STAGE_FATAL_ERROR;
+				}
 				break;
 			case STAGE_ALLOC_SWR:
-				inner_f->stage_alloc_swr();
-				f->stage++;
+				try {
+					inner_f->stage_alloc_swr();
+					f->stage++;
+				} catch (...)
+				{
+					f->stage=STAGE_FATAL_ERROR;
+				}
 				break;
 			case STAGE_GET_PACKET:
-				inner_f->stage_get_packet();
-				f->stage++;
+				try {
+					inner_f->stage_get_packet();
+				} catch (int& ret)
+				{
+					switch (ret)
+					{
+						case -1:
+							f->stage=STAGE_FATAL_ERROR;
+							break;
+						case AVERROR_EOF:
+							f->stage=STAGE_SEND_FLUSH_DECODER;
+							break;
+						default:
+						{
+							f->stage++;
+							if (ret<0)
+							{
+								f->stage=STAGE_FATAL_ERROR;
+							}else if (!inner_f->rightful_pkt ())
+							{
+								f->stage=STAGE_GET_PACKET;
+							}
+						}
+					}
+				}
 				break;
 			case STAGE_SEND_FRAME2DECODE:
-				inner_f->stage_send_frame2decode();
-				f->stage++;
+				try {
+					inner_f->stage_send_frame2decode();
+					f->stage=STAGE_RECEIVE_FRAME;
+				} catch (...)
+				{
+					f->stage=STAGE_GET_PACKET;
+				}
 				break;
 			case STAGE_SEND_FLUSH_DECODER:
-				inner_f->stage_send_flush_decoder();
-				f->stage++;
+				try {
+					inner_f->stage_send_flush_decoder();
+					f->stage++;
+				} catch (...)
+				{
+					f->stage=STAGE_FATAL_ERROR;
+				}
 				break;
 			case STAGE_RECEIVE_FRAME:
-				inner_f->stage_receive_frame();
-				f->stage++;
+				try {
+					inner_f->stage_receive_frame();
+					f->stage=STAGE_SET_ENCODER_PARAMETERS;
+				} catch (...)
+				{
+					f->stage=STAGE_GET_PACKET;
+				}
 				break;
 			case STAGE_SET_ENCODER_PARAMETERS:
-				inner_f->stage_set_encoder_parameters();
-				f->stage++;
+				{
+					inner_f->stage_set_encoder_parameters();
+					f->stage=STAGE_GET_FRAMES;
+				}
 				break;
 			case STAGE_GET_FRAMES:
-				inner_f->stage_get_frames ();
-				f->stage++;
+				try {
+					AVFrame* frame=inner_f->stage_get_frames ();
+					f->stage=STAGE_RECEIVE_FRAME;
+					if (frame)
+					{
+						return PyCapsule_New (frame, "_frame",
+					+[](T obj)
+					{
+						AVFrame* p=(AVFrame*)PyCapsule_GetPointer
+						(obj, "_frame");
+						av_frame_free(&p);
+					});
+					}
+				} catch (int& ret)
+				{
+					cout<<"Error: "<<ret<<endl;
+					if (inner_f->error_eof)
+					{
+						f->stage=STAGE_FATAL_ERROR;
+					}
+				}
 				break;
 			case STAGE_FATAL_ERROR:
 				PyErr_Format (
@@ -758,10 +858,50 @@ namespace f
 			default:
 				break;
 		}
+		struct stage_wth_name {
+			stage_t stage;
+			char* what;
+		} stages[]=
+		{
+			{STAGE_FATAL_ERROR, "STAGE_FATAL_ERROR"},
+			{STAGE_ALLOC_ENCODER, "STAGE_ALLOC_ENCODER"},
+			{STAGE_ENCODER_SET_PARAMETERS, "STAGE_ENCODER_SET_PARAMETERS"},
+			{STAGE_OPEN_INPUT, "STAGE_OPEN_INPUT"},
+			{STAGE_FIND_STREAM, "STAGE_FIND_STREAM"},
+			{STAGE_FIND_STREAM_INDEX, "STAGE_FIND_STREAM_INDEX"},
+			{STAGE_ALLOC_CONTEXT, "STAGE_ALLOC_CONTEXT"},
+			{STAGE_ALLOC_SWR, "STAGE_ALLOC_SWR"},
+			{STAGE_GET_PACKET, "STAGE_GET_PACKET"},
+			{STAGE_SEND_FRAME2DECODE, "STAGE_SEND_FRAME2DECODE"},
+			{STAGE_SEND_FLUSH_DECODER, "STAGE_SEND_FLUSH_DECODER"},
+			{STAGE_RECEIVE_FRAME, "STAGE_RECEIVE_FRAME"},
+			{STAGE_SET_ENCODER_PARAMETERS, "STAGE_SET_ENCODER_PARAMETERS"},
+			{STAGE_GET_FRAMES, "STAGE_GET_FRAMES"},
+			{STAGE_NO_OPT, NULL}
+		};
+		char* cur_stage_s=NULL;
+		char* stage_s=NULL;
+		for (stage_wth_name *p=stages; p->what; p++)
+		{
+			if (p->stage==cur_stage)
+			{
+				cur_stage_s=p->what;
+			}
+			if (p->stage==f->stage)
+			{
+				stage_s=p->what;
+			}
+		}
 
 		return PyTuple_Pack (2,
-			PyLong_FromLong (cur_stage),
-			PyLong_FromLong (f->stage));
+				PyTuple_Pack (2,
+					Py_BuildValue ("s", cur_stage_s),
+					PyLong_FromLong (cur_stage)
+					),
+				PyTuple_Pack (2,
+					Py_BuildValue ("s", stage_s),
+					PyLong_FromLong (f->stage)
+					));
 
 	}
 	T get_frames (T s, T a)
@@ -802,6 +942,11 @@ namespace f
 		Py_RETURN_NONE;
 	}
 	static PyMethodDef methods[]={
+		{"process_audio",
+			process_audio
+			, METH_VARARGS,
+		"process_audio: this method returns a tuple of (current_stage, next_stage) or a capsule of AVFrame* data;"},
+
 		{"send_frame",get_frames, METH_VARARGS,
 			"Get_frame"},
 		{"seek_duration",
@@ -882,7 +1027,7 @@ namespace f
 auto main(int argsc, char **args) -> int
 {
 	using namespace std;
-	av_log_set_callback (0x0);
+	//av_log_set_callback (0x0);
 	PyImport_AppendInittab ("fobject", &f::PyInit_av);
 	Py_InitializeEx (0);
 	Py_BytesMain (argsc, args);
