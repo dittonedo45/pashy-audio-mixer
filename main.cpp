@@ -87,6 +87,45 @@ struct filter_gh
 		}
 	}
 
+	void stage_get_src (int index, AVFrame* frame)
+	{
+		int ret;
+		ret=av_buffersrc_add_frame (ctx[index], frame);
+		if (ret<0)
+		{
+			throw ret;
+		}
+	}
+
+	AVFrame* frame=av_frame_alloc ();
+
+	void stage_get_sink ()
+	{
+		r=av_buffersink_get_frame (sink,
+				frame);
+		if (r<0)
+		{
+			throw r;
+		}
+	}
+
+	void stage_send_to_encoder ()
+	{
+		r=avcodec_send_frame (enc, frame);
+		if (r<0)
+			throw r;
+	}
+
+	AVPacket* stage_get_packet ()
+	{
+		AVPacket* pkt;
+		pkt=av_packet_alloc ();
+
+		r=avcodec_receive_packet (enc, pkt);
+		if (r<0)
+			throw r;
+		return pkt;
+	}
 
 	private:
 	AVFilterInOut *inout_layers(int n)
@@ -546,9 +585,19 @@ struct gil
 
 
 namespace filter {
+	enum stage_t {
+		STAGE_GET_SRC=0,
+		STAGE_GET_SINK,
+		STAGE_SEND_TO_ENCODER,
+		STAGE_GET_PACKET,
+		STAGE_NO_STAGE,
+		STAGE_NO_OPT
+	};
+
 	struct fil_object {
 		PyObject_HEAD
 		filter_gh *fg;
+		int stage;
 	};
 	using T=PyObject*;
 	T fil_object_new (PyTypeObject* t, T a, T k)
@@ -571,6 +620,7 @@ namespace filter {
 		fb->fg=new filter_gh (num_of_inputs,
 				num_of_outputs,
 				path);
+		fb->stage=STAGE_GET_SRC;
 		return 0;
 	}
 	void fil_object_dealloc (T o)
@@ -578,100 +628,77 @@ namespace filter {
 		fil_object* f=(fil_object*) o;
 		delete f->fg;
 	}
-	T send_frame_to_src (T s, T a)
+	T process_audio (T s, T a)
 	{
 		T arg;
 		int index;
 		int r;
 		fil_object* f=(fil_object*) s;
 
+		int stage=f->stage;
+		filter_gh* fg=f->fg;
+
 		if (!PyArg_ParseTuple (a, "Oi", &arg, &index))
 			return NULL;
 
-		AVFrame *frame=(AVFrame*)PyCapsule_GetPointer (arg, "_frame");
-
-		r=av_buffersrc_add_frame(f->fg->get_src (index), frame);
-
-		return PyLong_FromLong (r);
-	}
-	T get_frame_from_sink (T s, T a)
-	{
-		fil_object* f=(fil_object*) s;
-
-		AVFrame* frame=av_frame_alloc ();
-		int r;
+		if (Py_None!=arg)
 		{
-			gil g;
-			r = av_buffersink_get_frame_flags (
-					f->fg->get_sink (),
-					      frame, 4);
-		}
-		if (r<0)
-			return PyLong_FromLong (r);
-		return PyCapsule_New(frame, "_frame",
-				+[](T obj)
+
+			AVFrame *frame=(AVFrame*)PyCapsule_GetPointer (arg, "_frame");
+			fg->stage_get_src (index, frame);
+			f->stage=STAGE_GET_SINK;
+		}else
+		{
+			switch (stage)
 			{
-				AVFrame* p=
-				(AVFrame*)
-				PyCapsule_GetPointer (obj, "_frame");
-				gil g;
-				av_frame_free(&p);
-			});
-	}
-	T swallow (T s, T a)
-	{
-		fil_object* f=(fil_object*) s;
-		T arg;
-
-		if (!PyArg_ParseTuple (a, "O", &arg))
-			return NULL;
-		AVFrame *frame=(AVFrame*)
-			PyCapsule_GetPointer (arg, "_frame");
-
-		int r;
-		{
-		gil g;
-		r=avcodec_send_frame (f->fg->enc, frame);
-		}
-		if (r<0)
-			return PyLong_FromLong(r);
-		AVPacket* pkt;
-		{
-		gil g;
-		pkt=av_packet_alloc ();
-		}
-		struct u {
-			AVPacket* pkt;
-			u(AVPacket* z):pkt(z){}
-			~u(){
-			gil g;
-			av_packet_free (&pkt);
-		}} u(pkt);
-
-		T res=PyList_New (0);
-		do{
-			{
-				gil g;
-			if (avcodec_receive_packet (f->fg->enc,
-					pkt)) break;
+				case STAGE_GET_SINK:
+					try {
+						fg->stage_get_sink ();
+						f->stage=STAGE_SEND_TO_ENCODER;
+					}catch (...)
+					{
+						f->stage=STAGE_NO_STAGE;
+					}
+					break;
+				case STAGE_SEND_TO_ENCODER:
+					try {
+						fg->stage_send_to_encoder ();
+						f->stage=STAGE_GET_PACKET;
+					}catch (...)
+					{
+						f->stage=STAGE_NO_STAGE;
+					}
+					break;
+				case STAGE_GET_PACKET:
+					try{
+						AVPacket* pkt=fg->stage_get_packet ();
+						if (pkt && pkt->size)
+						{
+							return PyBytes_FromStringAndSize ( (const char*)pkt->data,
+									pkt->size);
+							f->stage=STAGE_GET_PACKET;
+						}
+					}catch (...) {
+						f->stage=STAGE_NO_STAGE;
+					}
+					break;
+				case STAGE_NO_STAGE:
+				default:
+					f->stage=STAGE_GET_SRC;
+					PyErr_Format (PyExc_StopIteration,
+							"Stop Iteration");
+					return NULL;
+					break;
 			}
-			PyList_Append(res,
-				PyBytes_FromStringAndSize
-				((const char*)pkt->data,
-				 pkt->size));
-		} while (1);
-		return res;
+		}
+
+		Py_RETURN_NONE;
 	}
+	
 	static PyMethodDef methods[]={
-		{"send_frame_to_src",
-			send_frame_to_src, METH_VARARGS,
+		{"process_audio",
+			process_audio, METH_VARARGS,
 			"send_frame_to_src"},
-		{"get_frame_from_sink",
-			get_frame_from_sink, METH_VARARGS,
-			"Get_frame"},
-		{"swallow",
-			swallow, METH_VARARGS,
-			"swallow!!"},
 		{NULL, NULL, 0, NULL}
 	};
 	static PyTypeObject fobject_type ={
