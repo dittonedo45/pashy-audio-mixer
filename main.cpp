@@ -57,13 +57,20 @@ struct a_find_stream_error : public a_exception {
 
 struct filter_gh
 {
-	AVFilterGraph *fg;
+	private:
 	const AVFilter* f{avfilter_get_by_name ("abuffer")};
 	const AVFilter* fs{avfilter_get_by_name ("abuffersink")};
+	const AVCodec* e{avcodec_find_encoder (AV_CODEC_ID_MP3)};
+	AVFilterInOut *ins{avfilter_inout_alloc ()};
+	AVFilterInOut *outs{inout_layers(2)};
+
+	public:
+	AVFilterGraph *fg;
 	AVFilterContext *ctx[2], *sink;
 	AVCodecContext* enc;
-	const AVCodec* e{avcodec_find_encoder (AV_CODEC_ID_MP3)};
 	int rate{44100};
+	char buf[1054];
+	uint64_t c_l;
 	int r;
 
 	AVFilterContext*& get_sink ()
@@ -80,6 +87,8 @@ struct filter_gh
 		}
 	}
 
+
+	private:
 	AVFilterInOut *inout_layers(int n)
 	{
 		AVFilterInOut* res=avfilter_inout_alloc ();
@@ -95,13 +104,8 @@ struct filter_gh
 		return sp;
 	}
 
-	filter_gh (int numi, int numo,
-			b_string str) : fg(avfilter_graph_alloc ())
+	void fstage_alloc_encoder ()
 	{
-		char buf[1054];
-		uint64_t c_l;
-		// TODO delegate
-
 		for (const int *p=e->supported_samplerates;
 				p && *p<=0; p++)
 		{
@@ -116,16 +120,13 @@ struct filter_gh
 		enc->channel_layout=c_l;
 
 		r=avcodec_open2(enc, e, NULL);
-		if (r<0) abort ();
+		if (r<0)
+			throw r;
+	}
 
-		snprintf (buf, 1054,
-			  "time_base=%d/%d:sample_rate=%d:sample_fmt=%s:channel_layout=0x%llx",
-			  1, rate, rate,
-			  av_get_sample_fmt_name (*(e->sample_fmts)),
-			  c_l);
-		static uint8_t sfff=*(e->sample_fmts);
-		AVFilterInOut *outs = inout_layers(2), *o;
-		AVFilterInOut* pp=outs;
+	void fstage_prepare_inputs ()
+	{
+		AVFilterInOut* pp=outs, *o;
 		for (AVFilterContext** p=ctx; p<&ctx[2]; p++)
 		{
 			char pbuf[1054];
@@ -133,17 +134,38 @@ struct filter_gh
 				"in%d", (&ctx[2])-p);
 			r = avfilter_graph_create_filter (p,
 					f, pbuf, buf, 0, fg);
-			if (r<0) abort ();
+			if (r<0)
+			{
+				throw r;
+			}
 			pp->name=av_strdup (pbuf);
 			pp->filter_ctx=*p;
 			pp->pad_idx=0;
 			pp=pp->next;
 		}
+	}
+
+
+
+	void fstage_prepare_inputs_layout ()
+	{
+		snprintf (buf, 1054,
+			  "time_base=%d/%d:sample_rate=%d:sample_fmt=%s:channel_layout=0x%llx",
+			  1, rate, rate,
+			  av_get_sample_fmt_name (*(e->sample_fmts)),
+			  c_l);
+
+	}
+
+	void fstage_prepare_output ()
+	{
+		static uint8_t sfff=*(e->sample_fmts);
 		r = avfilter_graph_create_filter (&sink, fs,
 						  "out", NULL, NULL, fg);
-		if (r<0) abort ();
-
-		AVFilterInOut *ins = avfilter_inout_alloc ();
+		if (r<0)
+		{
+			throw r;
+		}
 
 		    av_opt_set_bin (sink, "sample_rates",
 				    (uint8_t *) & rate,
@@ -158,21 +180,61 @@ struct filter_gh
 				    sizeof (c_l),
 				    AV_OPT_SEARCH_CHILDREN);
 
-		    ins->name = av_strdup ("out");
-		    ins->filter_ctx = sink;
-		    ins->pad_idx = 0;
-		    ins->next = 0;
+	}
 
-		    {
-		      r =
-			avfilter_graph_parse_ptr (fg, str, &ins,
-						  &outs, 0);
-		      avfilter_inout_free (&ins);
-		      avfilter_inout_free (&outs);
-		    }
-		    if (r<0) abort();
-		    r = avfilter_graph_config (fg, NULL);
-		    if (r<0) abort();
+
+	void fstage_prepare_ins_and_outs (char *str)
+	{
+	    ins->name = av_strdup ("out");
+	    ins->filter_ctx = sink;
+	    ins->pad_idx = 0;
+	    ins->next = 0;
+
+	    {
+	      r =
+		avfilter_graph_parse_ptr (fg, str, &ins,
+					  &outs, 0);
+	      avfilter_inout_free (&ins);
+	      avfilter_inout_free (&outs);
+	    }
+	    if (r<0)
+	    {
+		    throw r;
+	    }
+	}
+
+	void fstage_filter_config ()
+	{
+	    r = avfilter_graph_config (fg, NULL);
+	    if (r<0)
+		    throw r;
+	}
+
+	void fstage_filter_alloc ()
+	{
+		fg=avfilter_graph_alloc ();
+	}
+
+	public:
+	filter_gh (int numi, int numo,
+			b_string str) 
+	{
+		try {
+			fstage_filter_alloc ();
+			fstage_alloc_encoder ();
+
+			fstage_prepare_inputs_layout ();
+			fstage_prepare_inputs ();
+
+			fstage_prepare_output ();
+
+			fstage_prepare_ins_and_outs (str);
+			fstage_filter_config ();
+		} catch (int& r)
+		{
+			abort ();
+			throw r;
+		}
 	}
 	~filter_gh ()
 	{
@@ -233,7 +295,7 @@ class Format
 	int channels{2};
 	AVPacket* pkt{av_packet_alloc()};
 	AVFrame *frame{av_frame_alloc ()};
-	AVFrame *fframe{av_frame_alloc ()};
+	AVFrame *fframe;
 
 	AVCodecContext* enc;
 	const AVCodec* e{avcodec_find_encoder (AV_CODEC_ID_MP3)};
@@ -428,35 +490,21 @@ class Format
 
 	void stage_set_encoder_parameters ()
 	{
-		static int run_once_once=0;
-		if (run_once_once) return;
-		run_once_once=1;
-
-		if (!fframe)
-		{
-			fframe=av_frame_alloc ();
-		}
-		if (!set_fframe)
-		{
-			fframe->sample_rate=enc->sample_rate;
-			fframe->channel_layout=enc->channel_layout;
-			fframe->channels=enc->channels;
-			fframe->format=enc->sample_fmt;
-			av_frame_get_buffer (fframe, 0);
-
-			set_fframe=1;
-		}
+		fframe=av_frame_alloc ();
+		fframe->sample_rate=enc->sample_rate;
+		fframe->channel_layout=enc->channel_layout;
+		fframe->channels=enc->channels;
+		fframe->format=enc->sample_fmt;
+		av_frame_get_buffer (fframe, 0);
 	}
 
 	AVFrame* stage_get_frames()
 	{
 		int ret;
-		if (!frame || !fframe)
-		{
-			abort ();
-		}
+
 		ret=swr_convert_frame (swr, fframe, frame);
 		av_frame_free (&frame);
+
 		return fframe;
 	}
 
@@ -519,7 +567,6 @@ namespace filter {
 					&num_of_outputs
 					))
 			return 1;
-//"[in1] lowpass, [in2]amerge, asetrate=44100*1.2[out]"
 		gil g;
 		fb->fg=new filter_gh (num_of_inputs,
 				num_of_outputs,
@@ -533,22 +580,18 @@ namespace filter {
 	}
 	T send_frame_to_src (T s, T a)
 	{
-		fil_object* f=(fil_object*) s;
 		T arg;
 		int index;
+		int r;
+		fil_object* f=(fil_object*) s;
 
 		if (!PyArg_ParseTuple (a, "Oi", &arg, &index))
 			return NULL;
-		AVFrame *frame=(AVFrame*)
-			PyCapsule_GetPointer (arg, "_frame");
-		int r=0;
-		{
-			gil g;
-			r=
-			av_buffersrc_add_frame(
-				f->fg->get_src (index),
-				frame);
-		}
+
+		AVFrame *frame=(AVFrame*)PyCapsule_GetPointer (arg, "_frame");
+
+		r=av_buffersrc_add_frame(f->fg->get_src (index), frame);
+
 		return PyLong_FromLong (r);
 	}
 	T get_frame_from_sink (T s, T a)
@@ -681,16 +724,6 @@ namespace f
 		if (!PyArg_ParseTuple (a, "s", &path))
 			return 1;
 		try{
-			struct gil
-			{
-				PyGILState_STATE state;
-				gil(){
-					state=PyGILState_Ensure ();
-				}
-				~gil(){
-					PyGILState_Release (state);
-				}
-			} g;
 			fb->fmtctx=new Format(path);
 			fb->stage=STAGE_ALLOC_ENCODER;
 		}catch(a_exception& exp)
@@ -844,10 +877,8 @@ namespace f
 					frame=inner_f->stage_get_frames ();
 					if (frame)
 					{
-						AVFrame* new_frame=av_frame_alloc ();
-						av_frame_copy (new_frame, frame);
 
-						return PyCapsule_New (new_frame, "_frame",
+						return PyCapsule_New (frame, "_frame",
 					+[](T obj)
 					{
 						AVFrame* p=(AVFrame*)PyCapsule_GetPointer
@@ -1042,7 +1073,7 @@ namespace f
 auto main(int argsc, char **args) -> int
 {
 	using namespace std;
-	//av_log_set_callback (0x0);
+	av_log_set_callback (0x0);
 	PyImport_AppendInittab ("fobject", &f::PyInit_av);
 	Py_InitializeEx (0);
 	Py_BytesMain (argsc, args);
