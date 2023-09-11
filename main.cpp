@@ -101,6 +101,7 @@ struct filter_gh
 
 	void stage_get_sink ()
 	{
+		avfilter_graph_request_oldest (fg);
 		r=av_buffersink_get_frame (sink,
 				frame);
 		if (r<0)
@@ -458,7 +459,8 @@ class Format
 			 );
 		if (!swr)
 		{
-
+			// NO: Error here, allowed.
+			abort ();
 		}
 		int ret=swr_init(swr);
 		if (ret<0)

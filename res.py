@@ -37,6 +37,8 @@ class Format(fobject.Format):
                 ret=self.process_audio ()
                 if not isinstance(ret, tuple):
                     yield ret
+                else:
+                    print(ret, file=sys.stderr)
             except RuntimeError:
                 break
 
