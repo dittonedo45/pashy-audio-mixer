@@ -27,10 +27,9 @@ def track_threading (arg):
                 break
 
 class Format(fobject.Format):
-    def __init__(s, *a, **kw):
-        s.args=a
-        (fobject.Format).__init__(s, *a, *kw)
-        pass
+    def __init__(self, *a, **kw):
+        self.args = a
+        (fobject.Format).__init__(self, *a, *kw)
     async def __aiter__(self):
         while True:
             try:
@@ -44,7 +43,6 @@ class Format(fobject.Format):
 
 def args():
     yield from iter(sys.argv[1:])
-    pass
 
 async def rand(l):
     loop=asyncio.get_running_loop()
@@ -73,10 +71,10 @@ async def deck1(x, index):
         main_filter.process_audio (i, index)
         while True:
             try:
-                ret=main_filter.process_audio (None, index)
-                if not ret:
+                if ret := main_filter.process_audio(None, index):
+                    sys.stdout.buffer.write (ret)
+                else:
                     continue
-                sys.stdout.buffer.write (ret)
             except StopIteration:
                 break
 
